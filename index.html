@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nifty Market Intelligence</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --card: #131722;
+    --border: #232838;
+    --text: #e6e9ef;
+    --muted: #8a93a6;
+    --up: #2ecc71;
+    --down: #ff5c5c;
+    --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 16px; }
+  .disclaimer {
+    background: #1a1f2e;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 0.95rem;
+    margin: 0 0 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .signal-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .signal-direction {
+    font-size: 2rem;
+    font-weight: 700;
+  }
+  .signal-direction.up { color: var(--up); }
+  .signal-direction.down { color: var(--down); }
+  .meta { font-size: 0.8rem; color: var(--muted); }
+  .confidence-bar {
+    background: #232838;
+    border-radius: 6px;
+    height: 8px;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+  .confidence-fill { height: 100%; background: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  td { padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  .pct.up { color: var(--up); }
+  .pct.down { color: var(--down); }
+  .news-item {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+  }
+  .news-item:last-child { border-bottom: none; }
+  .news-source { color: var(--muted); font-size: 0.72rem; }
+  .tag {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+  }
+  .tag.negative { background: #3a1a1a; color: var(--down); }
+  .tag.positive { background: #1a3a24; color: var(--up); }
+  .refresh-btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    float: right;
+  }
+  .loading { color: var(--muted); font-size: 0.85rem; }
+  .error { color: var(--down); font-size: 0.8rem; }
+</style>
+</head>
+<body>
+
+<h1>📊 Nifty 50 Market Intelligence</h1>
+<div class="subtitle">Technical signal + live news + top movers</div>
+
+<div class="disclaimer">
+  ⚠️ This tool gives a <strong>probabilistic</strong> signal based on public data —
+  not a certain prediction. No tool can guarantee short-term market direction.
+  Not financial advice.
+</div>
+
+<div class="card">
+  <h2>Signal <button class="refresh-btn" onclick="loadData(true)">Refresh</button></h2>
+  <div id="signal-content" class="loading">Loading...</div>
+</div>
+
+<div class="card">
+  <h2>Top Movers (Nifty 50 sample)</h2>
+  <div id="movers-content" class="loading">Loading...</div>
+</div>
+
+<div class="card">
+  <h2>Latest News</h2>
+  <div id="news-content" class="loading">Loading...</div>
+</div>
+
+<script>
+async function loadData(forceRefresh = false) {
+  const url = forceRefresh ? "/api/refresh" : "/api/data";
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    renderSignal(data.signal, data.errors);
+    renderMovers(data.movers);
+    renderNews(data.news);
+  } catch (e) {
+    document.getElementById("signal-content").innerHTML =
+      '<div class="error">Failed to load data. Is the server running?</div>';
+  }
+}
+
+function renderSignal(signal, errors) {
+  const el = document.getElementById("signal-content");
+  if (!signal) {
+    el.innerHTML = '<div class="error">' +
+      (errors && errors.length ? errors.join("<br>") : "No signal available") +
+      '</div>';
+    return;
+  }
+  const dirClass = signal.direction === "UP" ? "up" : "down";
+  const arrow = signal.direction === "UP" ? "⬆️" : "⬇️";
+  el.innerHTML = `
+    <div class="signal-row">
+      <div class="signal-direction ${dirClass}">${arrow} ${signal.direction}</div>
+      <div class="meta">Confidence: ${signal.confidence}%</div>
+    </div>
+    <div class="confidence-bar">
+      <div class="confidence-fill" style="width:${signal.confidence}%"></div>
+    </div>
+    <div class="meta" style="margin-top:10px;">
+      Last close: ${signal.last_close} &middot; As of: ${signal.last_time}<br>
+      Backtest accuracy (recent data): ${signal.backtest_accuracy}%
+    </div>
+  `;
+}
+
+function renderMovers(movers) {
+  const el = document.getElementById("movers-content");
+  if (!movers || movers.length === 0) {
+    el.innerHTML = '<div class="error">No movers data available</div>';
+    return;
+  }
+  let rows = "";
+  movers.forEach(m => {
+    const cls = m.pct_change >= 0 ? "up" : "down";
+    const sign = m.pct_change >= 0 ? "+" : "";
+    rows += `<tr><td>${m.ticker}</td><td class="pct ${cls}">${sign}${m.pct_change}%</td></tr>`;
+  });
+  el.innerHTML = `<table>${rows}</table>`;
+}
+
+function renderNews(news) {
+  const el = document.getElementById("news-content");
+  if (!news || news.length === 0) {
+    el.innerHTML = '<div class="error">No news available (check feedparser is installed)</div>';
+    return;
+  }
+  let items = "";
+  news.forEach(n => {
+    const tagHtml = n.tag !== "neutral"
+      ? `<span class="tag ${n.tag}">${n.tag === "negative" ? "possible negative driver" : "possible positive driver"}</span>`
+      : "";
+    items += `
+      <div class="news-item">
+        <div>${n.title}${tagHtml}</div>
+        <div class="news-source">${n.source} &middot; ${n.published}</div>
+      </div>
+    `;
+  });
+  el.innerHTML = items;
+}
+
+loadData();
+setInterval(() => loadData(), 300000); // auto-refresh every 5 minutes
+</script>
+
+</body>
+</html>

@@ -227,6 +227,126 @@ def get_news():
 
 
 # ----------------------------------------------------------------
+# BOTTOM-REVERSAL / BREAKDOWN SCANNER
+# ----------------------------------------------------------------
+# Scans a universe of liquid NSE stocks (loaded from universe.csv, built
+# from an NSE Bhavcopy) and flags:
+#   - Stocks trading near their 52-week LOW but showing recent upward
+#     momentum (a possible "bottoming out" pattern)
+#   - Stocks trading near their 52-week HIGH but showing recent downward
+#     momentum (a possible "topping out" pattern)
+#
+# ⚠️ IMPORTANT: The "target" shown is the stock's own recent swing
+# high/low — a real historical price level, NOT a prediction of where
+# the stock WILL go or WHEN. There is no reliable way to predict an
+# exact future price or time window. Use this as context, not a promise.
+# ----------------------------------------------------------------
+UNIVERSE_FILE = "universe.csv"
+SCAN_HISTORY_PERIOD = "1y"
+NEAR_EXTREME_PCT = 15.0   # "near" the 52w low/high = within this % band
+RECENT_MOMENTUM_DAYS = 5  # how many days of recent price change to check
+
+
+def load_universe():
+    try:
+        df = pd.read_csv(UNIVERSE_FILE)
+        return df["Symbol"].dropna().tolist()
+    except Exception:
+        return NIFTY_50_TICKERS  # fallback if universe.csv missing
+
+
+def _compute_stock_metrics(symbol, hist):
+    """Given 1y of daily history for one stock, compute scanner metrics."""
+    close = hist["Close"].dropna()
+    if len(close) < 60:
+        return None
+
+    current = float(close.iloc[-1])
+    low_52w = float(close.min())
+    high_52w = float(close.max())
+    low_date = close.idxmin()
+    high_date = close.idxmax()
+
+    pct_above_low = (current / low_52w - 1) * 100
+    pct_below_high = (1 - current / high_52w) * 100
+
+    recent_change = (
+        (current / float(close.iloc[-RECENT_MOMENTUM_DAYS - 1]) - 1) * 100
+        if len(close) > RECENT_MOMENTUM_DAYS else 0.0
+    )
+
+    # RSI-14 for extra context
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    rsi = float((100 - (100 / (1 + rs))).iloc[-1])
+
+    return {
+        "symbol": symbol.replace(".NS", ""),
+        "current_price": round(current, 2),
+        "pct_above_52w_low": round(pct_above_low, 2),
+        "pct_below_52w_high": round(pct_below_high, 2),
+        "recent_5d_change": round(recent_change, 2),
+        "rsi_14": round(rsi, 1),
+        "target_recent_high": round(high_52w, 2),
+        "target_recent_low": round(low_52w, 2),
+        "low_date": str(low_date.date()) if hasattr(low_date, "date") else str(low_date),
+        "high_date": str(high_date.date()) if hasattr(high_date, "date") else str(high_date),
+    }
+
+
+def scan_bottom_and_breakdown(top_n=10):
+    """
+    Returns a dict:
+      {
+        "bottoming": [top_n stocks near 52w low, now showing upward momentum],
+        "topping":   [top_n stocks near 52w high, now showing downward momentum],
+      }
+    """
+    universe = load_universe()
+
+    data = yf.download(
+        universe, period=SCAN_HISTORY_PERIOD, interval="1d",
+        progress=False, group_by="ticker",
+    )
+
+    bottoming, topping = [], []
+
+    for symbol in universe:
+        try:
+            hist = data[symbol] if symbol in data.columns.get_level_values(0) else None
+            if hist is None or hist.empty:
+                continue
+            metrics = _compute_stock_metrics(symbol, hist.dropna())
+            if metrics is None:
+                continue
+
+            # Near 52-week LOW + recent upward momentum -> "bottoming out"
+            if (metrics["pct_above_52w_low"] <= NEAR_EXTREME_PCT
+                    and metrics["recent_5d_change"] > 0):
+                bottoming.append(metrics)
+
+            # Near 52-week HIGH + recent downward momentum -> "topping out"
+            if (metrics["pct_below_52w_high"] <= NEAR_EXTREME_PCT
+                    and metrics["recent_5d_change"] < 0):
+                topping.append(metrics)
+
+        except Exception:
+            continue
+
+    # Rank: strongest recent bounce off the low first
+    bottoming.sort(key=lambda m: m["recent_5d_change"], reverse=True)
+    # Rank: sharpest recent drop from the high first
+    topping.sort(key=lambda m: m["recent_5d_change"])
+
+    return {
+        "bottoming": bottoming[:top_n],
+        "topping": topping[:top_n],
+    }
+
+
+# ----------------------------------------------------------------
 # FULL REPORT (used by Flask API)
 # ----------------------------------------------------------------
 def get_full_report():

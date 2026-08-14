@@ -69,6 +69,12 @@ def fetch_nifty_data():
     df = yf.download(NIFTY_TICKER, period=PERIOD, interval=INTERVAL, progress=False)
     if df.empty:
         raise RuntimeError("No Nifty data returned — check internet connection.")
+
+    # Newer yfinance versions can return MultiIndex columns (ticker, field)
+    # even for a single ticker. Flatten to plain column names like "Close".
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     return df.dropna()
 
 
@@ -176,24 +182,47 @@ def tag_headline(title):
 
 
 def get_news():
-    """Returns a list of dicts: [{source, title, published, tag}, ...]."""
+    """Returns a list of dicts: [{source, title, published, tag}, ...],
+    sorted newest-first and limited to recent items only (last 48 hours).
+    Filters out stale/cached entries some RSS feeds occasionally serve.
+    """
     if feedparser is None:
         return []
 
+    import time as _time
+    from datetime import datetime, timezone
+
+    cutoff = _time.time() - (48 * 3600)  # only last 48 hours
     headlines = []
+
     for source, url in NEWS_FEEDS.items():
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:8]:
+            for entry in feed.entries[:15]:
                 title = entry.get("title", "")
+                published_struct = entry.get("published_parsed")
+
+                if published_struct:
+                    published_ts = _time.mktime(published_struct)
+                    if published_ts < cutoff:
+                        continue  # skip stale entries
+                else:
+                    published_ts = 0  # unknown date -> sort to the bottom
+
                 headlines.append({
                     "source": source,
                     "title": title,
                     "published": entry.get("published", ""),
                     "tag": tag_headline(title),
+                    "_ts": published_ts,
                 })
         except Exception:
             continue
+
+    headlines.sort(key=lambda h: h["_ts"], reverse=True)
+    for h in headlines:
+        del h["_ts"]
+
     return headlines
 
 

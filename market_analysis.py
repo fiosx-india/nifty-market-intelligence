@@ -267,6 +267,12 @@ def _compute_stock_metrics(symbol, hist):
     low_date = close.idxmin()
     high_date = close.idxmax()
 
+    # Skip near-flat instruments (liquid/cash funds, illiquid stocks with
+    # barely any price movement) — they're not real reversal candidates.
+    volatility_range_pct = (high_52w / low_52w - 1) * 100
+    if volatility_range_pct < 8:
+        return None
+
     pct_above_low = (current / low_52w - 1) * 100
     pct_below_high = (1 - current / high_52w) * 100
 
@@ -344,6 +350,134 @@ def scan_bottom_and_breakdown(top_n=10):
         "bottoming": bottoming[:top_n],
         "topping": topping[:top_n],
     }
+
+
+# ----------------------------------------------------------------
+# MULTI-HORIZON PROJECTION (1h / 2h / 3h) — EXPERIMENTAL
+# ----------------------------------------------------------------
+# For each stock in the current bottoming/topping lists, this trains a
+# small model per horizon and reports:
+#   - direction (UP/DOWN) the model predicts for that horizon
+#   - backtest accuracy for that SAME horizon on that SAME stock's
+#     recent history (so you can see for yourself how reliable — or
+#     unreliable — it actually is, per stock, per horizon)
+#   - an expected % move RANGE based on the stock's own historical
+#     volatility (a statistical range, not a promised destination)
+#
+# ⚠️ This is intentionally labeled EXPERIMENTAL. Backtest accuracy
+# hovering near 50% (a coin flip) is the expected, normal outcome —
+# that is the honest result, not a bug. Judge usefulness using the
+# accuracy numbers shown, not by assuming it works.
+# ----------------------------------------------------------------
+HORIZONS = [1, 2, 3]  # hours ahead
+PROJECTION_PERIOD = "60d"
+PROJECTION_INTERVAL = "1h"
+
+
+def _stock_features(close):
+    df = pd.DataFrame({"Close": close})
+    df["SMA_9"] = close.rolling(9).mean()
+    df["EMA_9"] = close.ewm(span=9, adjust=False).mean()
+
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    df["RSI_14"] = 100 - (100 / (1 + rs))
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df["MACD_hist"] = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
+
+    df["Return_1"] = close.pct_change(1)
+    df["Return_3"] = close.pct_change(3)
+    return df
+
+
+PROJ_FEATURES = ["SMA_9", "EMA_9", "RSI_14", "MACD_hist", "Return_1", "Return_3"]
+
+
+def get_hourly_projection(symbol):
+    """Trains a quick per-horizon model for one stock. Returns dict or None."""
+    try:
+        raw = yf.download(symbol, period=PROJECTION_PERIOD,
+                           interval=PROJECTION_INTERVAL, progress=False)
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw = raw.dropna()
+        if len(raw) < 120:
+            return None
+
+        close = raw["Close"]
+        feats = _stock_features(close)
+        hourly_returns = close.pct_change().dropna()
+        std_1h = float(hourly_returns.std())
+
+        result = {}
+        for h in HORIZONS:
+            data = feats.copy()
+            data["Target"] = (close.shift(-h) > close).astype(int)
+            data = data.dropna(subset=PROJ_FEATURES + ["Target"])
+            if len(data) < 60:
+                continue
+
+            X, y = data[PROJ_FEATURES], data["Target"]
+            split = int(len(data) * 0.8)
+            X_train, X_test = X.iloc[:split], X.iloc[split:]
+            y_train, y_test = y.iloc[:split], y.iloc[split:]
+
+            model = RandomForestClassifier(
+                n_estimators=150, max_depth=5, min_samples_leaf=8, random_state=42
+            )
+            model.fit(X_train, y_train)
+            acc = accuracy_score(y_test, model.predict(X_test)) if len(X_test) else float("nan")
+
+            latest = data.iloc[[-1]][PROJ_FEATURES]
+            proba = model.predict_proba(latest)[0]
+            pred = model.predict(latest)[0]
+
+            expected_move_pct = std_1h * (h ** 0.5) * 100  # volatility scaling
+
+            result[f"{h}h"] = {
+                "direction": "UP" if pred == 1 else "DOWN",
+                "confidence": round(float(max(proba)) * 100, 1),
+                "backtest_accuracy": round(float(acc) * 100, 1) if acc == acc else None,
+                "expected_move_range_pct": round(expected_move_pct, 2),
+            }
+
+        return {
+            "symbol": symbol.replace(".NS", ""),
+            "current_price": round(float(close.iloc[-1]), 2),
+            "horizons": result,
+        }
+    except Exception:
+        return None
+
+
+def get_projection_report(top_n=10):
+    """
+    Runs the bottoming/topping scan, then adds 1h/2h/3h projections for
+    each of those stocks. Returns:
+      { "bottoming": [...], "topping": [...] }
+    each item = output of get_hourly_projection(), or skipped if unavailable.
+    """
+    scan = scan_bottom_and_breakdown(top_n=top_n)
+
+    bottoming_proj = []
+    for stock in scan["bottoming"]:
+        proj = get_hourly_projection(stock["symbol"] + ".NS")
+        if proj:
+            proj["reference_target"] = stock["target_recent_high"]
+            bottoming_proj.append(proj)
+
+    topping_proj = []
+    for stock in scan["topping"]:
+        proj = get_hourly_projection(stock["symbol"] + ".NS")
+        if proj:
+            proj["reference_target"] = stock["target_recent_low"]
+            topping_proj.append(proj)
+
+    return {"bottoming": bottoming_proj, "topping": topping_proj}
 
 
 # ----------------------------------------------------------------

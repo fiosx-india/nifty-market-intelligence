@@ -150,3 +150,53 @@ with tab2:
         st.dataframe(df_t, use_container_width=True, hide_index=True)
     else:
         st.info("No stocks currently match this pattern.")
+
+# --- Experimental: 1h/2h/3h projection ---
+st.divider()
+st.subheader("🧪 1h / 2h / 3h Projection (EXPERIMENTAL)")
+st.error(
+    "⚠️ **Read this before trusting any number below.** Each stock shows "
+    "a **backtest accuracy** — the model's actual hit-rate on that stock's "
+    "own recent history. An accuracy near 50% means the prediction is no "
+    "better than a coin flip. This is normal and expected — short-term "
+    "price direction is inherently very hard to predict. Use the accuracy "
+    "numbers to judge for yourself whether to trust a given signal; do not "
+    "assume it works. Not financial advice."
+)
+
+@st.cache_data(ttl=1800)
+def load_projection():
+    return ma.get_projection_report(top_n=10)
+
+if st.button("▶️ Run 1h/2h/3h projection (takes ~1-2 min)"):
+    with st.spinner("Training per-stock models for each stock and horizon..."):
+        proj = load_projection()
+
+    ptab1, ptab2 = st.tabs(["⬆️ Rising candidates", "⬇️ Falling candidates"])
+
+    def render_projection_table(items):
+        if not items:
+            st.info("No data available.")
+            return
+        rows = []
+        for item in items:
+            row = {
+                "Stock": item["symbol"],
+                "Price": item["current_price"],
+                "Reference target": item.get("reference_target", "-"),
+            }
+            for h in [1, 2, 3]:
+                hd = item["horizons"].get(f"{h}h")
+                if hd:
+                    row[f"{h}h direction"] = hd["direction"]
+                    row[f"{h}h backtest acc %"] = hd["backtest_accuracy"]
+                    row[f"{h}h expected range %"] = hd["expected_move_range_pct"]
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    with ptab1:
+        render_projection_table(proj.get("bottoming", []))
+    with ptab2:
+        render_projection_table(proj.get("topping", []))
+else:
+    st.caption("Click the button above to run (not run automatically — it's slow and experimental).")
